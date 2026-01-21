@@ -75,6 +75,7 @@ private:
     std::unordered_set<void*> activeDeviceAllocs_;
     std::unordered_map<void*, size_t> pinnedSizes_;  // Track sizes for reuse
     std::unordered_map<void*, bool> pinnedFlags_;    // Track if pinned
+    std::unordered_map<void*, size_t> deviceSizes_;  // Track sizes for reuse
     std::mutex allocMutex_;
     
     bool usePinnedMemory_ = true;

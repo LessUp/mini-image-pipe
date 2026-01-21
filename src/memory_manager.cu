@@ -100,6 +100,9 @@ void MemoryManager::freePinned(void* ptr) {
     // Add to pool for reuse
     MemoryBlock block{ptr, blockSize, isPinned};
     pinnedPool_.freeBlocks.push_back(block);
+
+    pinnedSizes_.erase(ptr);
+    pinnedFlags_.erase(ptr);
 }
 
 void* MemoryManager::allocateDevice(size_t size) {
@@ -115,8 +118,10 @@ void* MemoryManager::findOrAllocateDevice(size_t size) {
     for (auto it = devicePool_.freeBlocks.begin(); it != devicePool_.freeBlocks.end(); ++it) {
         if (it->size >= size) {
             void* ptr = it->ptr;
+            size_t blockSize = it->size;
             devicePool_.freeBlocks.erase(it);
             activeDeviceAllocs_.insert(ptr);
+            deviceSizes_[ptr] = blockSize;
             return ptr;
         }
     }
@@ -130,6 +135,7 @@ void* MemoryManager::findOrAllocateDevice(size_t size) {
     }
 
     activeDeviceAllocs_.insert(ptr);
+    deviceSizes_[ptr] = size;
     return ptr;
 }
 
@@ -148,8 +154,15 @@ void MemoryManager::freeDevice(void* ptr) {
     activeDeviceAllocs_.erase(it);
 
     // Add to pool for reuse
-    MemoryBlock block{ptr, 0, false};
+    size_t blockSize = 0;
+    auto sizeIt = deviceSizes_.find(ptr);
+    if (sizeIt != deviceSizes_.end()) {
+        blockSize = sizeIt->second;
+    }
+    MemoryBlock block{ptr, blockSize, false};
     devicePool_.freeBlocks.push_back(block);
+
+    deviceSizes_.erase(ptr);
 }
 
 cudaError_t MemoryManager::copyToDeviceAsync(
@@ -203,6 +216,7 @@ void MemoryManager::shutdown() {
         cudaFree(ptr);
     }
     activeDeviceAllocs_.clear();
+    deviceSizes_.clear();
 
     pinnedAllocCount_ = 0;
     pinnedReuseCount_ = 0;

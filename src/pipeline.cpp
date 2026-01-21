@@ -79,7 +79,7 @@ void Pipeline::allocateIntermediateBuffers() {
         if (!task) continue;
 
         // If this task has dependencies, get input from first dependency's output
-        if (!task->dependencies.empty() && task->inputBuffer == nullptr) {
+        if (!task->dependencies.empty()) {
             int depId = task->dependencies[0];
             TaskNode* dep = graph_.getTask(depId);
             if (dep) {
@@ -98,28 +98,34 @@ void Pipeline::allocateIntermediateBuffers() {
             );
         }
 
-        // Allocate output buffer if needed
-        if (task->outputBuffer == nullptr && task->outputWidth > 0 && task->outputHeight > 0) {
-            size_t bufferSize = static_cast<size_t>(task->outputWidth) * 
+        // Allocate or resize output buffer if needed
+        if (task->outputWidth > 0 && task->outputHeight > 0 && task->outputChannels > 0) {
+            size_t bufferSize = static_cast<size_t>(task->outputWidth) *
                                task->outputHeight * task->outputChannels;
 
-            // Check if we can reuse an existing buffer
             auto it = intermediateBuffers_.find(taskId);
-            if (it != intermediateBuffers_.end() && bufferSizes_[taskId] >= bufferSize) {
-                task->outputBuffer = it->second;
-            } else {
-                // Free old buffer if exists
-                if (it != intermediateBuffers_.end()) {
-                    memMgr_.freeDevice(it->second);
+            if (it != intermediateBuffers_.end()) {
+                size_t currentSize = 0;
+                auto sizeIt = bufferSizes_.find(taskId);
+                if (sizeIt != bufferSizes_.end()) {
+                    currentSize = sizeIt->second;
                 }
 
-                // Allocate new buffer
-                void* buffer = memMgr_.allocateDevice(bufferSize);
-                if (buffer) {
-                    intermediateBuffers_[taskId] = buffer;
-                    bufferSizes_[taskId] = bufferSize;
-                    task->outputBuffer = buffer;
+                if (currentSize >= bufferSize) {
+                    task->outputBuffer = it->second;
+                    continue;
                 }
+
+                memMgr_.freeDevice(it->second);
+                intermediateBuffers_.erase(it);
+                bufferSizes_.erase(taskId);
+            }
+
+            void* buffer = memMgr_.allocateDevice(bufferSize);
+            if (buffer) {
+                intermediateBuffers_[taskId] = buffer;
+                bufferSizes_[taskId] = bufferSize;
+                task->outputBuffer = buffer;
             }
         }
     }
@@ -136,11 +142,11 @@ void Pipeline::freeIntermediateBuffers() {
 void Pipeline::setupBufferConnections() {
     // Connect output buffers to input buffers for dependent tasks
     for (auto& task : graph_.getTasks()) {
-        if (!task.dependencies.empty() && task.inputBuffer == nullptr) {
+        if (!task.dependencies.empty()) {
             // Use first dependency's output as input
             int depId = task.dependencies[0];
             TaskNode* dep = graph_.getTask(depId);
-            if (dep && dep->outputBuffer) {
+            if (dep) {
                 task.inputBuffer = dep->outputBuffer;
                 task.width = dep->outputWidth;
                 task.height = dep->outputHeight;
@@ -151,6 +157,8 @@ void Pipeline::setupBufferConnections() {
 }
 
 cudaError_t Pipeline::execute() {
+    graph_.reset();
+
     // Validate graph
     if (!graph_.validate()) {
         return cudaErrorInvalidValue;
@@ -159,11 +167,39 @@ cudaError_t Pipeline::execute() {
     // Find input/output nodes
     findInputOutputNodes();
 
+    for (const auto& task : graph_.getTasks()) {
+        if (!task.op) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
+    for (int nodeId : inputNodes_) {
+        TaskNode* task = graph_.getTask(nodeId);
+        if (!task || !task->inputBuffer || task->width <= 0 || task->height <= 0 || task->channels <= 0) {
+            return cudaErrorInvalidValue;
+        }
+    }
+
     // Allocate intermediate buffers
     allocateIntermediateBuffers();
 
     // Setup buffer connections
     setupBufferConnections();
+
+    for (const auto& task : graph_.getTasks()) {
+        if (!task.op) {
+            continue;
+        }
+        if (!task.inputBuffer || task->width <= 0 || task->height <= 0 || task->channels <= 0) {
+            return cudaErrorInvalidValue;
+        }
+        if (task->outputWidth <= 0 || task->outputHeight <= 0 || task->outputChannels <= 0) {
+            return cudaErrorInvalidValue;
+        }
+        if (!task->outputBuffer) {
+            return cudaErrorMemoryAllocation;
+        }
+    }
 
     // Execute the graph
     cudaError_t err = scheduler_.execute(graph_);
@@ -180,7 +216,16 @@ cudaError_t Pipeline::executeBatch(
         return cudaErrorInvalidValue;
     }
 
-    outputs.resize(inputs.size());
+    if (config_.maxBatchSize > 0 && inputs.size() > static_cast<size_t>(config_.maxBatchSize)) {
+        return cudaErrorInvalidValue;
+    }
+
+    findInputOutputNodes();
+    if (inputNodes_.empty()) {
+        return cudaErrorInvalidValue;
+    }
+
+    outputs.assign(inputs.size(), nullptr);
     cudaError_t lastError = cudaSuccess;
 
     // Process each frame

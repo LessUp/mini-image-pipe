@@ -5,7 +5,7 @@
 namespace mini_image_pipe {
 
 DAGScheduler::DAGScheduler(int numStreams)
-    : numStreams_(numStreams) {
+    : numStreams_(numStreams > 0 ? numStreams : 1) {
     // Create CUDA streams
     streams_.resize(numStreams_);
     for (int i = 0; i < numStreams_; i++) {
